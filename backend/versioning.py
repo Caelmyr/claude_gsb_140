@@ -30,6 +30,7 @@ versioning.py — 版本控制（提交 / 分支 / 合并 / 检出 / 差异）
 合并产生双亲提交（merge commit），冲突路径写入 commit.conflicts。
 """
 
+import posixpath
 import threading
 
 from . import config
@@ -372,6 +373,175 @@ class VersionStore:
         result["dirty"] = bool(result["changes"])
         return result
 
+    def commit_preview(self, branch=None):
+        """提交前影响分析：变更文件/行、目录，以及其它分支对同一文件的改动。"""
+        branch = branch or self._v().get("head_branch", config.DEFAULT_BRANCH)
+        diff = self.diff_working(branch)
+        risks = []
+        changed_paths = {c["path"] for c in diff["changes"]}
+        current_snapshot = self.snapshot_fs()
+        risks.extend(self._parallel_branch_risks(branch, changed_paths,
+                                                 exclude_head=True,
+                                                 current_snapshot=current_snapshot))
+        for change in diff["changes"]:
+            entry = current_snapshot.get(change["path"])
+            risk = self._conflict_marker_risk(change["path"], entry)
+            if risk:
+                risks.append(risk)
+        risks.sort(key=lambda r: (-self._risk_weight(r["severity"]), r["path"]))
+        return {
+            "mode": "commit",
+            "branch": branch,
+            "head_branch": branch,
+            "source_branch": None,
+            "dirty": diff["dirty"],
+            "changes": diff["changes"],
+            "stats": self._impact_stats(diff["changes"], risks),
+            "directories": self._directory_impact(diff["changes"]),
+            "risks": risks,
+            "parallel_branches": self._parallel_branch_summary(
+                branch, changed_paths, exclude_head=True,
+                current_snapshot=current_snapshot),
+            "summary": self._impact_summary("commit", diff["changes"], risks),
+        }
+
+    def merge_preview(self, source_ref, target_branch=None):
+        """只读预演合并，返回完整影响清单和具体冲突风险，不写工作区/版本树。"""
+        v = self._v()
+        target_branch = target_branch or v.get("head_branch")
+        head_id, _tbr = self.branch_head(target_branch)
+        theirs = self.resolve_ref(source_ref)
+        if not theirs:
+            raise VersionError(f"源引用不存在: {source_ref}")
+        if source_ref == target_branch:
+            raise VersionError("源分支与目标分支相同")
+        ours = v["commits"].get(head_id) if head_id else None
+        active_branch = v.get("head_branch")
+        if target_branch == active_branch:
+            working = self.diff_working(target_branch)
+        else:
+            working = {"changes": [], "stats": {"files": 0, "adds": 0, "dels": 0},
+                       "dirty": False}
+
+        if not ours:
+            incoming = self._diff_snapshots({}, theirs.get("snapshot", {}))
+            kind = "fast-forward"
+            base_id = None
+            conflicts = []
+            merged_snap = theirs.get("snapshot", {})
+            risks = self._dirty_overwrite_risks(working["changes"],
+                                                set(theirs.get("snapshot", {})),
+                                                kind)
+        else:
+            base_id = self.lca(ours["id"], theirs["id"])
+            base_kind = classify_merge_base(base_id, ours["id"],
+                                            theirs["id"],
+                                            config.MERGE_BASE_POLICY)
+            base_snap = (v["commits"].get(base_id) or {}).get("snapshot", {}) \
+                if base_id else {}
+            if base_kind == "noop":
+                incoming = self._diff_snapshots(ours.get("snapshot", {}),
+                                                theirs.get("snapshot", {}))
+                kind = "noop"
+                conflicts = []
+                merged_snap = ours.get("snapshot", {})
+                risks = []
+                if working["changes"]:
+                    dirty_paths = ", ".join(
+                        c["path"] for c in working["changes"][:8])
+                    if len(working["changes"]) > 8:
+                        dirty_paths += f" 等 {len(working['changes'])} 个"
+                    risks.append({
+                        "severity": "medium", "path": dirty_paths,
+                        "reason": f"源分支 {source_ref} 已包含在 {target_branch} 中；"
+                                  f"未提交文件 {dirty_paths} 不会被本次合并带入，"
+                                  "建议先提交或暂存。",
+                        "suggestion": "先提交这些文件，或取消合并继续当前修改。",
+                    })
+            elif base_kind == "fast-forward":
+                incoming = self._diff_snapshots(ours.get("snapshot", {}),
+                                                theirs.get("snapshot", {}))
+                kind = "fast-forward"
+                conflicts = []
+                merged_snap = theirs.get("snapshot", {})
+                risks = self._dirty_overwrite_risks(working["changes"],
+                                                    set(merged_snap), kind)
+            else:
+                kind = "merge"
+                risks = []
+                incoming = self._diff_snapshots(base_snap,
+                                                theirs.get("snapshot", {}))
+                plan, conflicts = self._merge_snapshots(
+                    base_snap, ours.get("snapshot", {}), theirs.get("snapshot", {}),
+                    ours_label=target_branch, theirs_label=source_ref)
+                merged_snap = self._planned_snapshot(
+                    ours.get("snapshot", {}), plan, preview=True)
+                if working["changes"]:
+                    # 真实 merge 会先把工作区提交到目标分支。预检时先模拟这个
+                    # “自动提交后的 ours”，再以它为 base 合并入站结果，避免把
+                    # 同一份本地修改重复计算成一次冲突。
+                    working_snap = self.snapshot_fs()
+                    auto_plan, _auto_local_conflicts = self._merge_snapshots(
+                        ours.get("snapshot", {}), ours.get("snapshot", {}),
+                        working_snap,
+                        ours_label="HEAD", theirs_label="工作区")
+                    committed_snap = self._planned_snapshot(
+                        ours.get("snapshot", {}), auto_plan, preview=True)
+                    incoming_plan, incoming_conflicts = self._merge_snapshots(
+                        base_snap, committed_snap, theirs.get("snapshot", {}),
+                        ours_label="自动提交", theirs_label=source_ref)
+                    merged_snap = self._planned_snapshot(
+                        committed_snap, incoming_plan, preview=True)
+                    conflicts = self._prefix_conflicts(
+                        incoming_conflicts, "未提交修改与入站改动冲突：")
+                    dirty_paths = ", ".join(
+                        c["path"] for c in working["changes"][:8])
+                    if len(working["changes"]) > 8:
+                        dirty_paths += f" 等 {len(working['changes'])} 个"
+                    risks.append({
+                        "severity": "medium", "path": dirty_paths,
+                        "reason": f"执行合并会先自动提交 {len(working['changes'])} 个未提交文件："
+                                  f"{dirty_paths}。操作范围从一次分支合并扩大为“自动提交 + 合并”。",
+                        "suggestion": "先显式提交并复跑预检，确认这些文件的修改符合预期。",
+                    })
+                risks = self._merge_conflict_risks(conflicts)
+
+        merge_changes = self._diff_snapshots(ours.get("snapshot", {}) if ours else {},
+                                             merged_snap)
+        all_paths = {c["path"] for c in merge_changes["changes"]}
+        risks.extend(self._parallel_branch_risks(
+            target_branch, all_paths,
+            exclude_heads={head_id, theirs.get("id")} if head_id else {theirs.get("id")},
+            current_snapshot=merged_snap))
+        risks.sort(key=lambda r: (-self._risk_weight(r["severity"]), r["path"]))
+        return {
+            "mode": "merge",
+            "kind": kind,
+            "branch": target_branch,
+            "head_branch": target_branch,
+            "source_branch": source_ref,
+            "target_branch": target_branch,
+            "base": base_id,
+            "base_short": short_hash(base_id or "", 8),
+            "ours": head_id,
+            "theirs": theirs.get("id"),
+            "dirty": working["dirty"],
+            "working_changes": working["changes"],
+            "incoming_changes": incoming["changes"],
+            "changes": merge_changes["changes"],
+            "stats": self._impact_stats(merge_changes["changes"], risks,
+                                        working_changes=working["changes"],
+                                        incoming_changes=incoming["changes"]),
+            "directories": self._directory_impact(merge_changes["changes"]),
+            "risks": risks,
+            "conflicts": conflicts,
+            "parallel_branches": self._parallel_branch_summary(
+                target_branch, all_paths,
+                exclude_heads={head_id, theirs.get("id")} if head_id else {theirs.get("id")},
+                current_snapshot=merged_snap),
+            "summary": self._impact_summary("merge", merge_changes["changes"], risks),
+        }
+
     def _diff_snapshots(self, snap_a, snap_b):
         changes = []
         total_adds = total_dels = 0
@@ -410,20 +580,27 @@ class VersionStore:
         }
 
     def _line_diff_stats(self, ea, eb):
-        """文本文件行级增删统计（内容按块读取，缓存按内容哈希对）。"""
-        if not ea or not eb:
+        """文本文件行级增删统计与受影响行段（内容按块读取，缓存按内容哈希对）。"""
+        if not ea and not eb:
             return None
-        if not (is_text_mime(ea.get("mime")) or is_text_mime(eb.get("mime"))):
+        mime = (ea or eb or {}).get("mime", "")
+        if not is_text_mime(mime):
             return None
-        if max(ea.get("size", 0), eb.get("size", 0)) > config.MERGE_MAX_TEXT_BYTES:
+        entries = [e for e in (ea, eb) if e]
+        if max(e.get("size", 0) for e in entries) > config.MERGE_MAX_TEXT_BYTES:
             return {"binary": True}
-        key = (ea.get("content_hash"), eb.get("content_hash"))
+        key = ((ea or {}).get("content_hash"), (eb or {}).get("content_hash"),
+               (ea or {}).get("size", 0), (eb or {}).get("size", 0))
         cached = self._diff_cache.get(key)
         if cached is not None:
             return cached
         try:
-            data_a = self.nn.read_blocks(ea.get("block_ids", []))
-            data_b = self.nn.read_blocks(eb.get("block_ids", []))
+            data_a = ea.get("__preview_data__")
+            if data_a is None:
+                data_a = self.nn.read_blocks(ea.get("block_ids", [])) if ea else b""
+            data_b = eb.get("__preview_data__")
+            if data_b is None:
+                data_b = self.nn.read_blocks(eb.get("block_ids", [])) if eb else b""
             if looks_binary(data_a) or looks_binary(data_b):
                 res = {"binary": True}
             else:
@@ -434,13 +611,337 @@ class VersionStore:
                 else:
                     ops = diff_opcodes(la, lb)
                     st = diff_stats(ops)
+                    hunks = []
+                    for tag, i1, i2, j1, j2 in ops:
+                        if tag == "equal":
+                            continue
+                        hunks.append({
+                            "kind": tag,
+                            "old_start": i1 + 1,
+                            "old_end": i2,
+                            "new_start": j1 + 1,
+                            "new_end": j2,
+                            "old_count": i2 - i1,
+                            "new_count": j2 - j1,
+                        })
                     res = {"adds": st["adds"], "dels": st["dels"],
-                           "similarity": st["similarity"]}
+                           "similarity": st["similarity"], "hunks": hunks}
         except Exception:
             res = None
         if res is not None:
             self._diff_cache.put(key, res)
         return res
+
+    # -------------------------------------------------------- 影响分析辅助
+    @staticmethod
+    def _risk_weight(level):
+        return {"high": 3, "medium": 2, "low": 1}.get(level, 0)
+
+    @staticmethod
+    def _directory_impact(changes):
+        dirs = {}
+        for ch in changes:
+            path = ch.get("path", "")
+            parent = posixpath.dirname(path) or "/"
+            touched = set()
+            cur = parent
+            while True:
+                touched.add(cur)
+                if cur == "/":
+                    break
+                cur = posixpath.dirname(cur) or "/"
+            for d in touched:
+                item = dirs.setdefault(d, {
+                    "path": d, "files": 0, "added": 0, "modified": 0,
+                    "deleted": 0, "adds": 0, "dels": 0})
+                item["files"] += 1
+                kind = ch.get("kind")
+                if kind in ("added", "modified", "deleted"):
+                    item[kind] += 1
+                item["adds"] += ch.get("adds", 0) or 0
+                item["dels"] += ch.get("dels", 0) or 0
+        return sorted(dirs.values(), key=lambda x: (-x["files"], x["path"]))
+
+    @staticmethod
+    def _impact_stats(changes, risks, working_changes=None, incoming_changes=None):
+        def _add_stats(items):
+            return {
+                "files": len(items or []),
+                "added": sum(1 for c in items or [] if c.get("kind") == "added"),
+                "modified": sum(1 for c in items or [] if c.get("kind") == "modified"),
+                "deleted": sum(1 for c in items or [] if c.get("kind") == "deleted"),
+                "adds": sum(c.get("adds", 0) or 0 for c in items or []),
+                "dels": sum(c.get("dels", 0) or 0 for c in items or []),
+            }
+        stats = _add_stats(changes)
+        stats["risk_total"] = len(risks)
+        stats["risk_high"] = sum(1 for r in risks if r.get("severity") == "high")
+        stats["risk_medium"] = sum(1 for r in risks if r.get("severity") == "medium")
+        stats["risk_low"] = sum(1 for r in risks if r.get("severity") == "low")
+        if working_changes is not None:
+            stats["working"] = _add_stats(working_changes)
+        if incoming_changes is not None:
+            stats["incoming"] = _add_stats(incoming_changes)
+        return stats
+
+    def _impact_summary(self, mode, changes, risks):
+        high = sum(1 for r in risks if r.get("severity") == "high")
+        medium = sum(1 for r in risks if r.get("severity") == "medium")
+        action = "提交" if mode == "commit" else "合并"
+        if high:
+            return f"{action}将影响 {len(changes)} 个文件；发现 {high} 个高风险点，需先处理。"
+        if medium:
+            return f"{action}将影响 {len(changes)} 个文件；发现 {medium} 个需确认项。"
+        return f"{action}将影响 {len(changes)} 个文件，未发现具体文件冲突。"
+
+    def _planned_snapshot(self, base_snap, plan, preview=False):
+        out = {}
+        for p, (action, entry, data) in plan.items():
+            if action == "delete":
+                continue
+            if action == "reuse":
+                if entry:
+                    out[p] = dict(entry)
+            elif action == "write":
+                new_entry = dict(entry or {})
+                if preview and data is not None:
+                    new_entry["__preview_data__"] = data
+                    new_entry["size"] = len(data)
+                    new_entry["content_hash"] = sha256_bytes(data)
+                out[p] = new_entry
+        return out
+
+    @staticmethod
+    def _prefix_conflicts(conflicts, prefix):
+        out = []
+        for c in conflicts:
+            x = dict(c)
+            x["detail"] = prefix + x.get("detail", "")
+            out.append(x)
+        return out
+
+    @staticmethod
+    def _line_label(start, end):
+        if not start and not end:
+            return "-"
+        if start == end:
+            return str(start)
+        return f"{start}-{end}"
+
+    def _merge_conflict_risks(self, conflicts):
+        risks = []
+        for c in conflicts:
+            hunks = c.get("hunks") or []
+            if hunks:
+                h = hunks[0]
+                parts = [f"base 第 {self._line_label(h.get('base_start'), h.get('base_end'))} 行"]
+                if h.get("ours_start"):
+                    parts.append(f"目标侧第 {self._line_label(h.get('ours_start'), h.get('ours_end'))} 行")
+                if h.get("theirs_start"):
+                    parts.append(f"源侧第 {self._line_label(h.get('theirs_start'), h.get('theirs_end'))} 行")
+                lines = "，".join(parts)
+            else:
+                lines = "文件级"
+            severity = "high"
+            reason = f"{lines}：{c.get('detail', '两侧修改无法自动合并')}"
+            if c.get("kind") == "binary":
+                reason = "二进制或超大文件无法做行级三方合并，当前策略会直接保留目标分支版本。"
+            elif c.get("kind") == "modify/delete":
+                reason = "一侧删除文件，另一侧修改文件；自动结果会保留被修改版本，删除意图可能丢失。"
+            risks.append({
+                "severity": severity,
+                "path": c.get("path"),
+                "kind": c.get("kind"),
+                "reason": reason,
+                "suggestion": "打开差异页逐段确认；统一两边意图后再执行合并。",
+                "hunks": hunks,
+            })
+        return risks
+
+    def _dirty_overwrite_risks(self, working_changes, target_paths, kind):
+        if not working_changes:
+            return []
+        touched = [c for c in working_changes if c.get("path") in target_paths]
+        if not touched:
+            names = "、".join(c["path"] for c in working_changes[:5])
+            more = f" 等 {len(working_changes)} 个" if len(working_changes) > 5 else ""
+            return [{
+                "severity": "medium", "path": names,
+                "reason": f"当前有 {len(working_changes)} 个未提交文件（{names}{more}）；"
+                          f"本次 {kind} 不直接覆盖这些文件，但工作区仍混杂在合并动作中。",
+                "suggestion": "先提交工作区，避免合并后难以区分改动来源。",
+            }]
+        names = "、".join(c["path"] for c in touched[:5])
+        more = f" 等 {len(touched)} 个" if len(touched) > 5 else ""
+        return [{
+            "severity": "high", "path": ", ".join(c["path"] for c in touched),
+            "reason": f"快进合并会直接物化源分支快照，未提交文件 {names}{more} 将被覆盖。",
+            "suggestion": "先提交或撤回这些本地改动，再执行快进合并。",
+        }]
+
+    def _conflict_marker_risk(self, path, entry):
+        if not entry or not is_text_mime(entry.get("mime", "")):
+            return None
+        if entry.get("size", 0) > config.MERGE_MAX_TEXT_BYTES:
+            return None
+        try:
+            data = self.nn.read_blocks(entry.get("block_ids", []))
+            text = decode_text(data) or ""
+        except Exception:
+            return None
+        markers = []
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.startswith("<<<<<<< ") or line.startswith(">>>>>>> "):
+                markers.append(n)
+                if len(markers) >= 10:
+                    break
+        if not markers:
+            return None
+        shown = ", ".join(str(n) for n in markers[:5])
+        return {
+            "severity": "high", "path": path,
+            "reason": f"文件仍含未解决的冲突标记（第 {shown} 行附近），提交会把冲突状态固化到历史。",
+            "suggestion": "先删除冲突标记并合并两侧内容，再提交。",
+        }
+
+    def _branch_changed_paths(self, head_id, base_id):
+        commits = self._v()["commits"]
+        head = commits.get(head_id) or {}
+        base = commits.get(base_id) or {}
+        diff = self._diff_snapshots(base.get("snapshot", {}),
+                                    head.get("snapshot", {}))
+        return {c["path"]: c for c in diff["changes"]}
+
+    def _parallel_branch_risks(self, current_branch, changed_paths,
+                               exclude_head=False, exclude_heads=None,
+                               current_snapshot=None):
+        v = self._v()
+        commits = v["commits"]
+        current_head, _ = self.branch_head(current_branch)
+        skip_ancestor_ids = self.ancestors(current_head) if current_head else set()
+        exclude_heads = set(exclude_heads or ())
+        if exclude_head and current_head:
+            exclude_heads.add(current_head)
+        for excluded in exclude_heads:
+            skip_ancestor_ids |= self.ancestors(excluded)
+        risks = []
+        for name, br in v["branches"].items():
+            if name == current_branch:
+                continue
+            other_head = br.get("head")
+            if not other_head or other_head in exclude_heads:
+                continue
+            if other_head in skip_ancestor_ids:
+                continue
+            base_id = self.lca(current_head, other_head) if current_head else None
+            base_snap = (commits.get(base_id) or {}).get("snapshot", {}) \
+                if base_id else {}
+            other_changes = self._branch_changed_paths(other_head, base_id)
+            overlap = sorted(changed_paths & set(other_changes))
+            actual_conflicts = {}
+            if overlap:
+                simulated_plan, simulated_conflicts = self._merge_snapshots(
+                    base_snap, current_snapshot,
+                    commits.get(other_head, {}).get("snapshot", {}),
+                    ours_label=current_branch, theirs_label=name)
+                actual_conflicts = {c["path"]: c for c in simulated_conflicts}
+            for path in overlap:
+                current_entry = self._current_path_entry(path, current_branch,
+                                                          changed_paths,
+                                                          current_snapshot)
+                other_change = other_changes[path]
+                other_entry = commits.get(other_head, {}).get("snapshot", {}).get(path)
+                severity, reason, suggestion = self._parallel_file_risk(
+                    path, current_entry, other_entry, other_change, name, base_id,
+                    actual_conflicts.get(path))
+                risks.append({
+                    "severity": severity, "path": path,
+                    "branches": [current_branch, name],
+                    "reason": reason, "suggestion": suggestion,
+                })
+        return risks
+
+    def _current_path_entry(self, path, branch, changed_paths, current_snapshot=None):
+        if current_snapshot is not None:
+            return current_snapshot.get(path)
+        change = changed_paths.get(path) if isinstance(changed_paths, dict) else None
+        if change:
+            snap = self.snapshot_fs()
+            return snap.get(path)
+        head_id, _ = self.branch_head(branch)
+        head = self._v()["commits"].get(head_id) if head_id else None
+        return (head or {}).get("snapshot", {}).get(path)
+
+    def _parallel_file_risk(self, path, ours_entry, theirs_entry,
+                            their_change, other_branch, base_id,
+                            actual_conflict=None):
+        if ours_entry is None or theirs_entry is None:
+            return ("high",
+                    f"与分支 {other_branch} 出现修改/删除分叉："
+                    f"{'当前侧删除' if ours_entry is None else f'{other_branch} 删除'}，"
+                    "另一侧仍保留修改。",
+                    "先与该分支确认应删除还是保留，再提交/合并。")
+        ours_h = ours_entry.get("content_hash")
+        theirs_h = theirs_entry.get("content_hash")
+        if ours_h == theirs_h:
+            return ("low",
+                    f"分支 {other_branch} 也改了同一文件，但两边内容哈希一致；"
+                    "合并时通常可自动收敛。",
+                    "合并后复核一次即可。")
+        mime = ours_entry.get("mime") or theirs_entry.get("mime") or ""
+        if not is_text_mime(mime):
+            return ("high",
+                    f"分支 {other_branch} 同时修改了该二进制/非文本文件，"
+                    "系统无法做行级自动合并。",
+                    "让一侧基于另一侧最新版本重新生成文件，或人工选择版本。")
+        base_entry = (self._v()["commits"].get(base_id) or {}) \
+            .get("snapshot", {}).get(path) if base_id else None
+        if base_entry is None:
+            return ("high",
+                    f"分支 {other_branch} 与当前分支都新增了同一路径，但内容不同（add/add）。",
+                    "双方共同确认文件内容，或把其中一侧迁移到不同路径。")
+        if base_entry.get("content_hash") == ours_h:
+            return ("low",
+                    f"只有分支 {other_branch} 相对共同祖先改动该文件；当前工作区改动可能来自未同步基线。",
+                    "先合并该分支最新内容后复跑预检。")
+        if base_entry.get("content_hash") == theirs_h:
+            return ("low", "当前侧改动相对共同祖先独占，另一分支尚未修改。", "正常提交即可。")
+        if actual_conflict:
+            hunks = actual_conflict.get("hunks") or []
+            line_part = "文件级冲突"
+            if hunks:
+                h = hunks[0]
+                line_part = (f"共同版本第 {self._line_label(h.get('base_start'), h.get('base_end'))} "
+                             "行附近冲突")
+            return ("high",
+                    f"分支 {other_branch} 也修改了该文件；三方预演已确认 {line_part}，"
+                    f"类型为 {actual_conflict.get('kind', 'content')}。",
+                    "先合并该分支或协调同一文件，提前解决后再提交。")
+        return ("low",
+                f"分支 {other_branch} 也修改了该文件，但三方预演可自动合并；"
+                "当前改动落在不同文本区域。",
+                "合并后回归该文件相关功能即可。")
+
+    def _parallel_branch_summary(self, current_branch, changed_paths,
+                                 exclude_head=False, exclude_heads=None,
+                                 current_snapshot=None):
+        risks = self._parallel_branch_risks(
+            current_branch, changed_paths, exclude_head=exclude_head,
+            exclude_heads=exclude_heads, current_snapshot=current_snapshot)
+        out = {}
+        for r in risks:
+            for b in r.get("branches", []):
+                if b == current_branch:
+                    continue
+                item = out.setdefault(b, {"branch": b, "high": 0,
+                                          "medium": 0, "low": 0,
+                                          "paths": set()})
+                item[r["severity"]] += 1
+                item["paths"].add(r["path"])
+        return [{
+            "branch": b, "high": x["high"], "medium": x["medium"],
+            "low": x["low"], "paths": sorted(x["paths"]),
+        } for b, x in sorted(out.items())]
 
     def file_at(self, ref, path):
         """读取某引用下某文件的内容（历史版本读取）。"""
@@ -647,12 +1148,13 @@ class VersionStore:
                 merged = self._merge_text_file(p, b, o, t,
                                                ours_label, theirs_label)
                 if merged is not None:
-                    text, file_conflicts = merged
+                    text, file_conflicts, conflict_hunks = merged
                     plan[p] = ("write", dict(o), text.encode("utf-8"))
                     if file_conflicts:
                         conflicts.append({
                             "path": p, "kind": "content",
-                            "detail": f"{file_conflicts} 处文本冲突，已写入冲突标记"})
+                            "detail": f"{file_conflicts} 处文本冲突，已写入冲突标记",
+                            "hunks": conflict_hunks})
                     continue
             conflicts.append({"path": p, "kind": "binary",
                               "detail": "二进制/超大文件双侧修改，保留 ours"})
@@ -662,9 +1164,15 @@ class VersionStore:
     def _merge_text_file(self, path, b, o, t, ours_label, theirs_label):
         """读取三方内容做 diff3 行级合并；失败返回 None（按二进制冲突处理）。"""
         try:
-            base_data = self.nn.read_blocks((b or {}).get("block_ids", [])) if b else b""
-            ours_data = self.nn.read_blocks(o.get("block_ids", []))
-            theirs_data = self.nn.read_blocks(t.get("block_ids", []))
+            base_data = (b or {}).get("__preview_data__")
+            if base_data is None:
+                base_data = self.nn.read_blocks((b or {}).get("block_ids", [])) if b else b""
+            ours_data = o.get("__preview_data__")
+            if ours_data is None:
+                ours_data = self.nn.read_blocks(o.get("block_ids", []))
+            theirs_data = t.get("__preview_data__")
+            if theirs_data is None:
+                theirs_data = self.nn.read_blocks(t.get("block_ids", []))
         except Exception:
             return None
         if looks_binary(ours_data) or looks_binary(theirs_data):
@@ -680,7 +1188,29 @@ class VersionStore:
                         marker_ours=config.CONFLICT_MARKER_OURS,
                         marker_sep=config.CONFLICT_MARKER_SEP,
                         marker_theirs=config.CONFLICT_MARKER_THEIRS)
-        return result.text, len(result.conflicts)
+        hunks = []
+
+        def side_ranges(lines_by_base):
+            if not lines_by_base:
+                return None, None
+            starts = [x[0] for x in lines_by_base if x[0] is not None]
+            ends = [x[1] for x in lines_by_base if x[1] is not None]
+            if starts and ends:
+                return min(starts) + 1, max(ends)
+            return None, None
+
+        for c in result.conflicts:
+            ours_start, ours_end = side_ranges(c.get("ours_by_base"))
+            theirs_start, theirs_end = side_ranges(c.get("theirs_by_base"))
+            hunks.append({
+                "base_start": c.get("base_start", 0) + 1,
+                "base_end": c.get("base_end", 0),
+                "ours_start": ours_start,
+                "ours_end": ours_end,
+                "theirs_start": theirs_start,
+                "theirs_end": theirs_end,
+            })
+        return result.text, len(result.conflicts), hunks
 
     # ---------------------------------------------------------------- 检出
     def checkout(self, branch, author="admin", auto_commit=True):

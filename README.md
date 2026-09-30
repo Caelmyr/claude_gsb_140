@@ -169,8 +169,8 @@ GET  /api/fs/tree|list|stat      POST /api/fs/mkdir|rename|move|delete
 GET  /api/thumbnail|file/preview|file/blocks
 POST /api/upload/begin|chunk|complete      GET /api/upload/status|sessions
 GET  /api/download/info|download(Range)
-GET  /api/version/branches|commits|graph|diff|working_diff|file_at|history|stats
-POST /api/version/commit|branch|branch_delete|checkout|merge|restore|diff_text
+GET  /api/version/branches|commits|graph|commit_preview|diff|working_diff|file_at|history|stats
+POST /api/version/commit|merge_preview|branch|branch_delete|checkout|merge|restore|diff_text
 GET  /api/nodes|nodes/blocks|nodes/matrix|nodes/block_paths
 GET  /api/health/queue           GET /api/sim/events
 POST /api/sim/kill|revive|corrupt|chaos                （admin）

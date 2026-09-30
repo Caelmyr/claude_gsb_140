@@ -623,10 +623,10 @@ def merge3(base_lines, our_lines, their_lines,
       * 重叠 => 若结果相同取其一，否则产生冲突块（写入冲突标记）。
     返回 MergeResult。
     """
-    changes_o = [(i1, i2, our_lines[j1:j2])
+    changes_o = [(i1, i2, our_lines[j1:j2], j1, j2)
                  for tag, i1, i2, j1, j2 in diff_opcodes(base_lines, our_lines)
                  if tag != "equal"]
-    changes_t = [(i1, i2, their_lines[j1:j2])
+    changes_t = [(i1, i2, their_lines[j1:j2], j1, j2)
                  for tag, i1, i2, j1, j2 in diff_opcodes(base_lines, their_lines)
                  if tag != "equal"]
 
@@ -657,15 +657,15 @@ def merge3(base_lines, our_lines, their_lines,
             while progress:
                 progress = False
                 while oi < len(changes_o) and changes_o[oi][0] <= end:
-                    s, e, lines = changes_o[oi]
-                    region_o.append((s, e, lines))
+                    s, e, lines, side_start, side_end = changes_o[oi]
+                    region_o.append((s, e, lines, side_start, side_end))
                     if e > end:
                         end = e
                     oi += 1
                     progress = True
                 while ti < len(changes_t) and changes_t[ti][0] <= end:
-                    s, e, lines = changes_t[ti]
-                    region_t.append((s, e, lines))
+                    s, e, lines, side_start, side_end = changes_t[ti]
+                    region_t.append((s, e, lines, side_start, side_end))
                     if e > end:
                         end = e
                     ti += 1
@@ -684,6 +684,10 @@ def merge3(base_lines, our_lines, their_lines,
                     "base": base_lines[start:end],
                     "ours": ours_region,
                     "theirs": theirs_region,
+                    "ours_by_base": [(x[3], x[4]) for x in region_o
+                                     if x[4] > x[3]],
+                    "theirs_by_base": [(x[3], x[4]) for x in region_t
+                                       if x[4] > x[3]],
                 })
                 show_ours, show_theirs = ((theirs_label, ours_label)
                                           if label_swap
@@ -715,7 +719,7 @@ def _render_side(base_lines, start, end, changes):
     """把一侧在 [start, end) 区域内的变更应用到 base 片段，得到该侧结果行。"""
     out = []
     pos = start
-    for s, e, lines in changes:
+    for s, e, lines, _side_start, _side_end in changes:
         if s > pos:
             out.extend(base_lines[pos:min(s, end)])
         out.extend(lines)

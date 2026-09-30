@@ -464,6 +464,20 @@ def api_version_diff(ctx):
     return ctx.nn.versions.diff_refs(a, b)
 
 
+@route("GET", "/api/version/commit_preview")
+def api_version_commit_preview(ctx):
+    branch = ctx.query.get("branch") or None
+    return ctx.nn.versions.commit_preview(branch)
+
+
+@route("POST", "/api/version/merge_preview")
+def api_version_merge_preview(ctx):
+    body = ctx.json()
+    return {"ok": True,
+            **ctx.nn.versions.merge_preview(body.get("source", ""),
+                                            body.get("target"))}
+
+
 @route("GET", "/api/version/working_diff")
 def api_version_working_diff(ctx):
     branch = ctx.query.get("branch") or None

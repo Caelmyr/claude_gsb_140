@@ -17,6 +17,28 @@
   .branch-chip .cnt { color:var(--muted); font-size:11px; }
   .lane-dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:2px; }
   .cf-file { color:var(--bad); font-family:var(--mono); font-size:12px; }
+  .impact-report { display:flex; flex-direction:column; gap:10px; }
+  .impact-summary { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .impact-panel { border:1px solid var(--border); border-radius:10px; background:var(--panel-2); overflow:hidden; }
+  .impact-panel > summary { cursor:pointer; padding:9px 12px; font-weight:600; font-size:13px; user-select:none; }
+  .impact-panel[open] > summary { border-bottom:1px solid var(--border-soft); }
+  .impact-panel-body { padding:9px 12px; display:flex; flex-direction:column; gap:7px; }
+  .impact-table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  .impact-table th, .impact-table td { padding:7px 8px; border-bottom:1px solid var(--border-soft); vertical-align:top; }
+  .impact-table th { color:var(--muted); text-align:left; font-weight:500; white-space:nowrap; }
+  .impact-path { font-family:var(--mono); word-break:break-all; }
+  .impact-lines { font-family:var(--mono); color:var(--muted); white-space:nowrap; font-size:11.5px; }
+  .risk-item { border-left:3px solid var(--border); padding:7px 9px; background:rgba(255,255,255,.025); border-radius:6px; }
+  .risk-item.high { border-left-color:var(--bad); background:var(--bad-soft); }
+  .risk-item.medium { border-left-color:var(--warn); background:var(--warn-soft); }
+  .risk-item.low { border-left-color:var(--info); background:rgba(57,188,208,.08); }
+  .risk-head { display:flex; gap:7px; align-items:center; flex-wrap:wrap; margin-bottom:3px; }
+  .risk-reason { font-size:12.5px; line-height:1.55; }
+  .risk-fix { color:var(--muted); font-size:12px; margin-top:2px; }
+  .impact-mini-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:6px; }
+  .impact-mini { border:1px solid var(--border-soft); border-radius:8px; padding:7px 9px; font-size:12px; }
+  .impact-mini b { display:block; font-family:var(--mono); font-size:15px; margin-top:2px; }
+  .impact-empty { color:var(--muted); font-size:12.5px; padding:8px 0; }
 </style>
 </head>
 <body>
@@ -76,6 +98,7 @@
               · <b>提交</b>把当前文件树快照存入版本树（块引用不可变）<br>
               · <b>合并</b>以 LCA 为 base 做三方合并；文本冲突写入
               <span class="mono"><<<<<<<</span> 标记<br>
+              · <b>提交/合并前</b>会先列出波及目录、文件、行段和其它分支的同文件改动<br>
               · <b>检出</b>将分支头快照物化回文件系统（未提交修改会自动提交保护）<br>
               · 点击提交可展开变更文件，点击文件名查看该提交的行级差异
             </div>
@@ -224,24 +247,165 @@ function bindChangeClicks(container, a, b) {
 
 document.getElementById("btn-more").onclick = () => { shownCommits += 30; loadTimeline(); };
 
+// ------------------------------------------------------------------ 影响分析
+function kindBadge(kind) {
+  const cls = kind === "added" ? "ok" : kind === "deleted" ? "bad" : "warn";
+  const txt = kind === "added" ? "A" : kind === "deleted" ? "D" : "M";
+  return `<span class="badge plain ${cls}">${txt}</span>`;
+}
+
+function rangeText(start, end) {
+  if (!start && !end) return "—";
+  return start === end ? String(start) : `${start}-${end}`;
+}
+
+function hunkText(ch) {
+  if (ch.binary) return "二进制";
+  if (ch.too_large) return "大文件（未计算行）";
+  if (!ch.hunks || !ch.hunks.length) {
+    if (ch.kind === "added") return `新增 ${ch.new_size || 0} B`;
+    if (ch.kind === "deleted") return `删除 ${ch.old_size || 0} B`;
+    return "行级信息不可用";
+  }
+  return ch.hunks.slice(0, 4).map(h => {
+    if (h.kind === "insert") return `新 ${rangeText(h.new_start, h.new_end)}`;
+    if (h.kind === "delete") return `旧 ${rangeText(h.old_start, h.old_end)}`;
+    return `旧 ${rangeText(h.old_start, h.old_end)} → 新 ${rangeText(h.new_start, h.new_end)}`;
+  }).join("；") + (ch.hunks.length > 4 ? ` 等 ${ch.hunks.length} 段` : "");
+}
+
+function renderImpactFiles(changes, options = {}) {
+  if (!changes.length) return `<div class="impact-empty">无文件变化</div>`;
+  return `<div class="table-wrap"><table class="impact-table">
+    <thead><tr><th>状态</th><th>文件</th><th>受影响行</th><th>行增删</th><th>大小</th></tr></thead>
+    <tbody>${changes.map(ch => `
+      <tr class="${options.link ? "chg-row" : ""}" data-p="${esc(ch.path)}" ${options.link ? "style=\"cursor:pointer\"" : ""}>
+        <td>${kindBadge(ch.kind)}</td>
+        <td class="impact-path">${esc(ch.path)}</td>
+        <td class="impact-lines">${esc(hunkText(ch))}</td>
+        <td class="impact-lines">${ch.adds !== undefined ? `<span style="color:var(--ok)">+${ch.adds}</span> / <span style="color:var(--bad)">-${ch.dels}</span>` : "—"}</td>
+        <td class="impact-lines">${DFSVS.fmtBytes(ch.new_size || ch.old_size || 0)}</td>
+      </tr>`).join("")}</tbody>
+  </table></div>`;
+}
+
+function renderDirectories(dirs) {
+  if (!dirs.length) return `<div class="impact-empty">无目录变化</div>`;
+  return `<div class="table-wrap"><table class="impact-table">
+    <thead><tr><th>目录</th><th>波及文件</th><th>A / M / D</th><th>行增删</th></tr></thead>
+    <tbody>${dirs.slice(0, 30).map(d => `
+      <tr>
+        <td class="impact-path">${esc(d.path)}/</td>
+        <td>${d.files}</td>
+        <td class="impact-lines">${d.added} / ${d.modified} / ${d.deleted}</td>
+        <td class="impact-lines"><span style="color:var(--ok)">+${d.adds}</span> / <span style="color:var(--bad)">-${d.dels}</span></td>
+      </tr>`).join("")}</tbody>
+  </table></div>`;
+}
+
+function renderRisks(risks) {
+  if (!risks.length) {
+    return `<div class="risk-item low"><div class="risk-reason">未发现落在具体文件上的冲突风险；仍建议按影响清单回归相关目录。</div></div>`;
+  }
+  return risks.map(r => `
+    <div class="risk-item ${esc(r.severity)}">
+      <div class="risk-head">
+        <span class="badge plain ${r.severity === "high" ? "bad" : r.severity === "medium" ? "warn" : "info"}">${r.severity === "high" ? "高风险" : r.severity === "medium" ? "需确认" : "低风险"}</span>
+        <span class="impact-path">${esc(r.path || "-")}</span>
+        ${r.kind ? `<span class="badge dim plain">${esc(r.kind)}</span>` : ""}
+        ${(r.branches || []).map(b => `<span class="badge acc plain">${esc(b)}</span>`).join("")}
+      </div>
+      <div class="risk-reason">${esc(r.reason || "")}</div>
+      <div class="risk-fix">建议：${esc(r.suggestion || "复核后再继续")}</div>
+    </div>`).join("");
+}
+
+function renderParallel(branches) {
+  if (!branches.length) return `<div class="impact-empty">没有其它分支同时改这些路径</div>`;
+  return branches.map(b => `
+    <div class="risk-item ${b.high ? "high" : b.medium ? "medium" : "low"}">
+      <div class="risk-head"><span class="badge acc plain">${esc(b.branch)}</span>
+        ${b.high ? `<span class="badge bad plain">${b.high} 高</span>` : ""}
+        ${b.medium ? `<span class="badge warn plain">${b.medium} 中</span>` : ""}
+        ${b.low ? `<span class="badge info plain">${b.low} 低</span>` : ""}
+      </div>
+      <div class="impact-path small">${b.paths.map(esc).join("、")}</div>
+    </div>`).join("");
+}
+
+function renderImpactStats(stats, mode) {
+  const extra = mode === "merge" ? `
+    <div class="impact-mini">未提交文件<b>${stats.working?.files ?? 0}</b></div>
+    <div class="impact-mini">入站文件<b>${stats.incoming?.files ?? 0}</b></div>` : "";
+  return `<div class="impact-mini-grid">
+    <div class="impact-mini">波及文件<b>${stats.files}</b></div>
+    <div class="impact-mini">新增 / 修改 / 删除<b>${stats.added} / ${stats.modified} / ${stats.deleted}</b></div>
+    <div class="impact-mini">行增删<b><span style="color:var(--ok)">+${stats.adds}</span> / <span style="color:var(--bad)">-${stats.dels}</span></b></div>
+    <div class="impact-mini">高 / 中 / 低风险<b>${stats.risk_high} / ${stats.risk_medium} / ${stats.risk_low}</b></div>
+    ${extra}
+  </div>`;
+}
+
+function renderImpactReport(d, options = {}) {
+  const high = d.stats.risk_high || 0;
+  const summaryCls = high ? "bad" : (d.stats.risk_medium ? "warn" : "ok");
+  const workingPanel = d.mode === "merge" ? `
+    <details class="impact-panel">
+      <summary>未提交改动（${d.working_changes.length}）</summary>
+      <div class="impact-panel-body">${renderImpactFiles(d.working_changes)}</div>
+    </details>` : "";
+  const incomingPanel = d.mode === "merge" ? `
+    <details class="impact-panel">
+      <summary>源分支入站改动（${d.incoming_changes.length}）</summary>
+      <div class="impact-panel-body">${renderImpactFiles(d.incoming_changes)}</div>
+    </details>` : "";
+  return `<div class="impact-report">
+    <div class="impact-summary">
+      <span class="badge ${summaryCls}">${high ? "存在高风险" : d.stats.risk_medium ? "存在需确认项" : "可继续"}</span>
+      <span class="small">${esc(d.summary || "")}</span>
+    </div>
+    ${renderImpactStats(d.stats, d.mode)}
+    ${workingPanel}${incomingPanel}
+    <details class="impact-panel" open>
+      <summary>完整文件与行影响清单（${d.changes.length}）</summary>
+      <div class="impact-panel-body">${renderImpactFiles(d.changes, { link: !!options.link })}</div>
+    </details>
+    <details class="impact-panel">
+      <summary>波及目录（${d.directories.length}）</summary>
+      <div class="impact-panel-body">${renderDirectories(d.directories)}</div>
+    </details>
+    <details class="impact-panel" ${high ? "open" : ""}>
+      <summary>具体风险提示（${d.risks.length}）</summary>
+      <div class="impact-panel-body">${renderRisks(d.risks)}</div>
+    </details>
+    <details class="impact-panel">
+      <summary>同时改动的其它分支（${d.parallel_branches.length}）</summary>
+      <div class="impact-panel-body">${renderParallel(d.parallel_branches)}</div>
+    </details>
+  </div>`;
+}
+
 // ------------------------------------------------------------------ 提交
 document.getElementById("btn-commit").onclick = async () => {
-  let wd;
-  try { wd = await api("GET", "/api/version/working_diff"); } catch (e) { wd = { changes: [], dirty: false }; }
-  const listHtml = wd.changes.length
-    ? renderChanges(wd.changes, wd.stats, "", "")
-    : `<div class="empty small">工作区与 HEAD 一致，没有可提交的修改</div>`;
   const body = document.createElement("div");
   body.innerHTML = `
     <label class="fl" style="margin-bottom:10px">提交信息
       <textarea id="cm-msg" rows="2" placeholder="例如 feat: 支持分块上传断点续传"></textarea></label>
-    <div class="small muted" style="margin-bottom:6px">将提交到分支 <b>${esc(headBranch)}</b>：</div>
-    <div class="scroll-y" style="max-height:240px">${listHtml}</div>`;
-  modal({
-    title: "提交工作区快照", body, okText: "提交",
+    <div class="small muted" style="margin-bottom:6px">将提交到分支 <b>${esc(headBranch)}</b>，先预检影响范围与并行分支：</div>
+    <div id="cm-impact" class="scroll-y" style="max-height:52vh"><div class="impact-empty">正在分析…</div></div>
+    <label id="cm-ack-wrap" class="small" style="display:none;margin-top:8px">
+      <input type="checkbox" id="cm-ack"> 我已了解上述具体文件风险，仍要提交
+    </label>`;
+  const m = modal({
+    title: "提交前影响分析", body, wide: true, okText: "确认提交",
     onOk: async (bodyEl) => {
+      const d = bodyEl._impact;
       const msg = bodyEl.querySelector("#cm-msg").value.trim();
       if (!msg) { toast("请填写提交信息", "warn"); return false; }
+      if (d && d.stats.risk_high && !bodyEl.querySelector("#cm-ack").checked) {
+        toast("请先勾选确认已了解高风险文件", "warn");
+        return false;
+      }
       try {
         const r = await api("POST", "/api/version/commit", { message: msg });
         toast(`已提交 ${r.commit.short}（${r.stats.files_changed} 个文件）`, "ok");
@@ -249,7 +413,17 @@ document.getElementById("btn-commit").onclick = async () => {
       } catch (e) { toast("提交失败：" + e.message, "bad"); return false; }
     }
   });
-  bindChangeClicks(body, "HEAD", "WORKING");
+  try {
+    const d = await api("GET", `/api/version/commit_preview?branch=${encodeURIComponent(headBranch)}`);
+    body._impact = d;
+    body.querySelector("#cm-impact").innerHTML = renderImpactReport(d, { link: true });
+    body.querySelector("#cm-ack-wrap").style.display = d.stats.risk_high ? "" : "none";
+    bindChangeClicks(body, "HEAD", "WORKING");
+    if (!d.changes.length) m.el.querySelector(".m-ok").disabled = true;
+  } catch (e) {
+    body.querySelector("#cm-impact").innerHTML = `<div class="badge bad plain">预检失败：${esc(e.message)}</div>`;
+    m.el.querySelector(".m-ok").disabled = true;
+  }
 };
 
 // ------------------------------------------------------------------ 分支
@@ -283,22 +457,33 @@ document.getElementById("btn-merge").onclick = async () => {
           `<option value="${esc(b.name)}">${esc(b.name)} · ${esc(b.last_message || "").slice(0, 24)}</option>`).join("")}
         </select></label>
       <label class="fl" style="flex:1">目标分支
-        <input type="text" id="mg-dst" value="${esc(brs.head_branch)}" readonly></label>
+        <span style="display:flex;gap:6px;align-items:center">
+          <input type="text" id="mg-dst" value="${esc(brs.head_branch)}" readonly style="flex:1">
+          <button type="button" class="btn sm ghost" id="mg-run">预检</button>
+        </span></label>
     </div>
-    <div class="small muted">合并采用三方算法：base = 两分支的最近公共祖先（LCA）。
-      文本冲突将写入 <span class="mono">&lt;&lt;&lt;&lt;&lt;&lt;&lt;</span> 标记并提交为冲突待解决状态。</div>
-    <div id="mg-result" style="margin-top:12px"></div>`;
+    <div class="small muted">先做只读三方预演：不物化工作区、不创建提交；风险会定位到文件和行段。</div>
+    <div id="mg-impact" style="margin-top:12px;max-height:52vh;overflow-y:auto"><div class="impact-empty">正在加载预演…</div></div>
+    <label id="mg-ack-wrap" class="small" style="display:none;margin-top:8px">
+      <input type="checkbox" id="mg-ack"> 我已查看具体冲突文件和原因，仍要执行合并
+    </label>`;
   const m = modal({
-    title: "合并分支", body, wide: true, okText: "执行合并",
+    title: "合并前影响分析", body, wide: true, okText: "执行合并",
     onOk: async (bodyEl) => {
+      const d = bodyEl._impact;
+      if (!d) { toast("请先运行预检", "warn"); return false; }
+      if (d.stats.risk_high && !bodyEl.querySelector("#mg-ack").checked) {
+        toast("请先勾选确认已了解高风险冲突", "warn");
+        return false;
+      }
       const src = bodyEl.querySelector("#mg-src").value;
       const dst = bodyEl.querySelector("#mg-dst").value;
-      const out = bodyEl.querySelector("#mg-result");
-      out.innerHTML = `<div class="small muted">合并中 …</div>`;
+      const out = bodyEl.querySelector("#mg-impact");
+      out.insertAdjacentHTML("beforeend", `<div class="small muted">正在执行合并 …</div>`);
       try {
         const r = await api("POST", "/api/version/merge", { source: src, target: dst });
         if (r.kind === "noop") {
-          out.innerHTML = `<div class="badge ok plain">${esc(r.message || "已是最新")}</div>`;
+          out.insertAdjacentHTML("beforeend", `<div class="badge ok plain">${esc(r.message || "已是最新")}</div>`);
           return false;
         }
         let html = `<div class="trace-box">
@@ -315,17 +500,36 @@ document.getElementById("btn-merge").onclick = async () => {
             </div>`).join("");
         }
         html += `</div>`;
-        out.innerHTML = html;
+        out.insertAdjacentHTML("beforeend", html);
         toast(r.conflicts?.length ? `合并完成，但有 ${r.conflicts.length} 处冲突` : "合并完成",
               r.conflicts?.length ? "warn" : "ok");
         loadAll();
-        return false;   // 保留弹窗展示结果
+        return false;
       } catch (e) {
-        out.innerHTML = `<div class="badge bad plain">${esc(e.message)}</div>`;
+        out.insertAdjacentHTML("beforeend", `<div class="badge bad plain">${esc(e.message)}</div>`);
         return false;
       }
     }
   });
+  async function runPreview() {
+    const src = body.querySelector("#mg-src").value;
+    const dst = body.querySelector("#mg-dst").value;
+    body.querySelector("#mg-impact").innerHTML = `<div class="impact-empty">正在预演 ${esc(src)} → ${esc(dst)} …</div>`;
+    m.el.querySelector(".m-ok").disabled = true;
+    try {
+      const d = await api("POST", "/api/version/merge_preview", { source: src, target: dst });
+      body._impact = d;
+      body.querySelector("#mg-impact").innerHTML = renderImpactReport(d, { link: false });
+      body.querySelector("#mg-ack-wrap").style.display = d.stats.risk_high ? "" : "none";
+      m.el.querySelector(".m-ok").disabled = false;
+    } catch (e) {
+      body._impact = null;
+      body.querySelector("#mg-impact").innerHTML = `<div class="badge bad plain">预检失败：${esc(e.message)}</div>`;
+    }
+  }
+  body.querySelector("#mg-src").onchange = runPreview;
+  body.querySelector("#mg-run").onclick = runPreview;
+  runPreview();
 };
 
 // ------------------------------------------------------------------ 检出
