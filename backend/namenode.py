@@ -38,6 +38,7 @@ from .util import (HttpError, LRU, RateCounter, RingBuffer, b64e, gen_id,
                    is_text_mime, needs_recovery, canonical_access_op,
                    now, parse_range, sha256_bytes, short_hash, split_multi,
                    vv_compare, vv_merge)
+from .impact import CommitImpact
 from .versioning import VersionStore
 
 
@@ -69,6 +70,7 @@ class NameNode:
         self.auth = AuthManager(self.meta)
         self.perms = PermissionManager(self.meta, self.auth)
         self.versions = VersionStore(self)
+        self.impact = CommitImpact(self)
 
         # ---- 节点注册表（内存态；摘要持久化到 cluster 文档） ----
         self.nodes = {}                  # node_id -> NodeInfo dict

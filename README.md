@@ -10,9 +10,9 @@
 纯 Python（标准库，零第三方依赖）+ 原生 HTML/CSS/JS 实现的**教学级分布式文件系统**：
 模拟 HDFS 风格的 NameNode / DataNode 集群（节点间全 HTTP 通信），
 在其上叠加 Git 风格的版本控制（提交 / 分支 / 三方合并 / 检出），
-并提供 11 个页面的管理控制台。
+并提供 12 个页面的管理控制台。
 
-代码规模：**约 12,000 行**（后端 ~8,700 行 Python，前端 ~4,400 行 HTML/CSS/JS）。
+代码规模：**约 12,800 行**（后端 ~9,300 行 Python，前端 ~4,900 行 HTML/CSS/JS）。
 
 ---
 
@@ -43,7 +43,7 @@ python3 -m backend.datanode --id dn5 --port 8025
 
 ---
 
-## 2. 前端页面（11 个，要求 10 个 + 仪表盘）
+## 2. 前端页面（12 个，要求 10 个 + 仪表盘 + 预检台）
 
 | 页面 | 文件 | 内容 |
 |---|---|---|
@@ -51,6 +51,7 @@ python3 -m backend.datanode --id dn5 --port 8025
 | 文件浏览 | `files.html` | 目录树 + 缩略图网格 + 面包屑 + 块/副本详情抽屉 + 文本预览 |
 | 上传下载 | `transfer.html` | 分块上传（分片可视化、暂停/续传/混沌模式）、Range 分段下载（断点续传、sha256 校验、副本命中统计） |
 | 版本历史 | `versions.html` | 提交时间线（泳道）、分支管理、提交/合并/检出、冲突展示、文件级历史与回滚 |
+| 提交/合并预检 | `impact.html` | **提交前**：未提交改动波及的目录/文件/行 + 其它分支并行修改交叉检查（diff3 干跑，逐文件给出冲突理由/位置/化解建议）；**合并前**：快进/无操作/三方判定与只读干跑影响清单，不落盘、不提交 |
 | 差异对比 | `diff.html` | 版本 diff + 文本 diff 双模式、Myers/Patience/difflib 选择、unified/双栏视图、行内字符级高亮、大文件性能试验台 |
 | 节点状态 | `nodes.html` | 节点卡片（心跳/容量/IO/版本向量）、块×节点副本矩阵、恢复队列、杀死/复活/注入损坏演练、实时事件流 |
 | 存储统计 | `stats.html` | 容量 donut、副本数分布、块大小直方图、24h 吞吐、容量趋势、类型分布、热度榜（sparkline）、元数据文档表 |
@@ -170,6 +171,7 @@ GET  /api/thumbnail|file/preview|file/blocks
 POST /api/upload/begin|chunk|complete      GET /api/upload/status|sessions
 GET  /api/download/info|download(Range)
 GET  /api/version/branches|commits|graph|diff|working_diff|file_at|history|stats
+GET  /api/version/impact|merge_preview      （提交/合并前的影响清单与冲突干跑，只读）
 POST /api/version/commit|branch|branch_delete|checkout|merge|restore|diff_text
 GET  /api/nodes|nodes/blocks|nodes/matrix|nodes/block_paths
 GET  /api/health/queue           GET /api/sim/events
@@ -199,12 +201,13 @@ gsb4/
 │   ├── auth.py                # 用户/口令/会话 + 路径 ACL
 │   ├── filesystem.py          # inode 树 + 回收站
 │   ├── versioning.py          # 提交/分支/合并/检出/GC 引用集
+│   ├── impact.py              # 提交/合并前影响分析：波及面清单 + 三方干跑冲突预检（只读）
 │   ├── namenode.py            # 块表/放置/心跳/恢复/上传下载/统计/GC
 │   ├── datanode.py            # 块存储/心跳/汇报/scrub/流水线/文档同步
 │   ├── http_server.py         # 路由 + 静态页 + 鉴权中间件
 │   ├── seed.py                # 演示数据（含冲突合并场景）
 │   └── main.py                # 集群装配
-├── frontend/                  # 11 页面 + css/app.css + js/app.js
+├── frontend/                  # 12 页面 + css/app.css + js/app.js
 └── tests/smoke_test.py        # 97 项端到端断言
 ```
 

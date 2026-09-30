@@ -556,6 +556,26 @@ def api_version_stats(ctx):
     return ctx.nn.versions.repo_stats()
 
 
+@route("GET", "/api/version/impact")
+def api_version_impact(ctx):
+    """提交前预检：未提交改动的影响清单 + 与其它分支的并行修改冲突风险。"""
+    branch = ctx.query.get("branch") or None
+    return ctx.nn.impact.analyze_commit(branch)
+
+
+@route("GET", "/api/version/merge_preview")
+def api_version_merge_preview(ctx):
+    """合并前预检（干跑，不落盘）：影响清单 + 逐文件冲突理由与位置。"""
+    source = ctx.query.get("source", "")
+    target = ctx.query.get("target") or None
+    if not source:
+        raise ApiError(400, "缺少 source 参数（源分支/引用）")
+    try:
+        return ctx.nn.impact.preview_merge(source, target)
+    except ValueError as e:
+        raise ApiError(400, str(e))
+
+
 # ============================================================================
 # API: 节点 / 演练
 # ============================================================================

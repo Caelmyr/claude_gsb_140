@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>提交 / 合并预检 · DFSVS</title>
+<link rel="stylesheet" href="css/app.css">
+<style>
+  /* ---- 模式切换 ---- */
+  .mode-tabs { display:flex; gap:8px; }
+  .mode-tab {
+    padding:7px 16px; border-radius:20px; cursor:pointer; font-size:13px;
+    background:var(--panel-2); border:1px solid var(--border); color:var(--text-dim);
+    display:inline-flex; gap:7px; align-items:center;
+  }
+  .mode-tab.active { background:var(--accent-soft); border-color:var(--accent); color:#cfe0ff; }
+  .mode-tab:hover { border-color:var(--accent); }
+
+  /* ---- 风险条目 ---- */
+  .risk-item {
+    display:flex; gap:12px; padding:10px 12px; border-radius:var(--radius-sm);
+    border:1px solid var(--border); background:var(--bg-soft);
+    margin-bottom:8px; align-items:flex-start;
+  }
+  .risk-item.high { border-color:rgba(229,83,75,.45); background:var(--bad-soft); }
+  .risk-item.warn { border-color:rgba(240,165,56,.4); background:var(--warn-soft); }
+  .risk-item.info { border-color:rgba(57,188,208,.35); background:rgba(57,188,208,.08); }
+  .risk-item.ok   { border-color:rgba(47,191,113,.35); background:var(--ok-soft); }
+  .risk-ico { font-size:16px; line-height:1.3; }
+  .risk-body { flex:1; min-width:0; }
+  .risk-path { font-family:var(--mono); font-size:12.5px; font-weight:650;
+               word-break:break-all; }
+  .risk-reason { font-size:12.5px; color:var(--text-dim); margin-top:3px; }
+  .risk-sug { font-size:12px; color:var(--info); margin-top:4px; }
+  .risk-sug::before { content:"化解建议："; color:var(--muted); }
+  .risk-tags { margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; }
+
+  /* ---- 文件清单 ---- */
+  .file-row { border-bottom:1px solid var(--border-soft); }
+  .file-head {
+    display:flex; gap:10px; align-items:center; padding:8px 6px; cursor:pointer;
+  }
+  .file-head:hover { background:rgba(79,140,255,.05); }
+  .file-caret { width:14px; color:var(--muted); font-size:11px; flex:none; }
+  .file-row.open .file-caret { transform:rotate(90deg); }
+  .file-kind { flex:none; }
+  .file-path { font-family:var(--mono); font-size:12.5px; flex:1; min-width:0;
+               word-break:break-all; }
+  .file-meta { font-family:var(--mono); font-size:11.5px; color:var(--muted);
+               flex:none; display:flex; gap:10px; align-items:center; }
+  .file-body { display:none; padding:4px 6px 12px 30px; }
+  .file-row.open .file-body { display:block; }
+
+  .tag {
+    display:inline-flex; align-items:center; gap:4px; font-size:11px;
+    padding:1px 8px; border-radius:12px; border:1px solid var(--border);
+    color:var(--text-dim); background:var(--panel-2);
+  }
+  .tag.branch { color:#cfe0ff; border-color:rgba(79,140,255,.4); background:var(--accent-soft); }
+  .tag.high { color:var(--bad); border-color:rgba(229,83,75,.45); background:var(--bad-soft); }
+  .tag.warn { color:var(--warn); border-color:rgba(240,165,56,.4); background:var(--warn-soft); }
+  .tag.info { color:var(--info); }
+
+  /* ---- 冲突片段 ---- */
+  .cf-block {
+    border:1px solid rgba(229,83,75,.4); border-radius:var(--radius-sm);
+    margin:8px 0; overflow:hidden;
+  }
+  .cf-side { font-family:var(--mono); font-size:12px; }
+  .cf-side .cf-label {
+    padding:3px 10px; font-size:11px; font-weight:650;
+    background:rgba(229,83,75,.12); color:#ffb3ad;
+  }
+  .cf-side.ours .cf-label { background:rgba(79,140,255,.14); color:#bcd4ff; }
+  .cf-side.base .cf-label { background:rgba(111,120,144,.18); color:var(--muted); }
+  .cf-lines { margin:0; padding:6px 10px; white-space:pre-wrap; word-break:break-all;
+              color:var(--text-dim); }
+  .cf-lines.add { color:#8ce0b0; }
+  .cf-lines.del { color:#ff9d97; }
+  .cf-more { padding:2px 10px 5px; font-size:11px; color:var(--muted); }
+
+  /* ---- 行号区间 ---- */
+  .hunk-chips { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0; }
+  .hunk-chip {
+    font-family:var(--mono); font-size:11px; padding:2px 8px; border-radius:5px;
+    border:1px solid var(--border); background:var(--panel-2); color:var(--text-dim);
+  }
+  .hunk-chip ins { color:var(--ok); text-decoration:none; }
+  .hunk-chip del { color:var(--bad); text-decoration:none; }
+
+  /* ---- 目录 / 分支卡片 ---- */
+  .dir-chip {
+    display:flex; justify-content:space-between; gap:10px; align-items:center;
+    padding:7px 12px; border:1px solid var(--border); border-radius:var(--radius-sm);
+    background:var(--bg-soft); font-size:12.5px;
+  }
+  .dir-chip .mono { word-break:break-all; }
+  .branch-card {
+    border:1px solid var(--border); border-radius:var(--radius-sm);
+    padding:10px 12px; background:var(--bg-soft); margin-bottom:8px;
+  }
+  .branch-card .bn { font-weight:650; font-family:var(--mono); }
+  .branch-card.overlap { border-color:rgba(229,83,75,.4); }
+
+  .verdict {
+    display:flex; align-items:center; gap:14px; padding:14px 18px;
+    border-radius:var(--radius); border:1px solid var(--border);
+    background:var(--panel); margin-bottom:16px;
+  }
+  .verdict.go    { border-color:rgba(47,191,113,.5); }
+  .verdict.hold  { border-color:rgba(240,165,56,.5); }
+  .verdict.stop  { border-color:rgba(229,83,75,.55); }
+  .verdict .v-ico { font-size:30px; line-height:1; }
+  .verdict .v-title { font-size:16px; font-weight:700; }
+  .verdict .v-sub { font-size:12.5px; color:var(--text-dim); margin-top:2px; }
+
+  .seg { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  select, input[type=text] { min-width:0; }
+  .filters { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .filter-btn {
+    padding:3px 11px; border-radius:14px; font-size:12px; cursor:pointer;
+    background:var(--panel-2); border:1px solid var(--border); color:var(--text-dim);
+  }
+  .filter-btn.active { border-color:var(--accent); color:#cfe0ff; background:var(--accent-soft); }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside id="sidebar" class="sidebar"></aside>
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="page-title">提交 / 合并预检</h1>
+        <div class="sub" id="page-sub">动手前看清影响清单与并行修改冲突风险</div>
+      </div>
+      <div class="spacer"></div>
+      <div class="userchip" id="userchip"></div>
+    </header>
+
+    <section class="content">
+      <!-- 模式 + 参数栏 -->
+      <div class="card">
+        <div class="card-title">分析对象
+          <span class="spacer"></span>
+          <button class="btn sm ghost" id="btn-refresh" title="重新分析">↻ 刷新</button>
+        </div>
+        <div class="seg" style="margin-bottom:12px">
+          <span class="mode-tab active" data-mode="commit">① 提交预检 · 未提交改动</span>
+          <span class="mode-tab" data-mode="merge">② 合并预检 · 干跑一次合并</span>
+        </div>
+
+        <!-- 提交模式参数 -->
+        <div id="bar-commit" class="seg">
+          <label class="fl">分支
+            <select id="cm-branch"></select></label>
+          <span class="small dim">对比该分支 HEAD 与当前工作区；并交叉检查其它所有分支的并行改动。</span>
+        </div>
+
+        <!-- 合并模式参数 -->
+        <div id="bar-merge" class="seg hidden">
+          <label class="fl">源分支（被合并方）
+            <select id="mg-source"></select></label>
+          <span style="align-self:center">→</span>
+          <label class="fl">目标分支
+            <select id="mg-target"></select></label>
+          <span class="small dim">只读干跑：使用与真实合并相同的 LCA / 三方 / diff3 算法，
+            <b>不落盘、不产生提交</b>。</span>
+        </div>
+      </div>
+
+      <!-- 总判定 -->
+      <div id="verdict"></div>
+
+      <!-- KPI -->
+      <div class="grid cols-5" id="kpis"></div>
+
+      <!-- 风险提示 -->
+      <div class="card">
+        <div class="card-title">风险提示 <span class="hint" id="risk-hint"></span>
+          <span class="spacer"></span>
+          <span class="filters" id="risk-filters">
+            <span class="filter-btn active" data-f="all">全部</span>
+            <span class="filter-btn" data-f="high">高风险</span>
+            <span class="filter-btn" data-f="warn">需复核</span>
+            <span class="filter-btn" data-f="info">知会</span>
+          </span>
+        </div>
+        <div id="risks-box"></div>
+        <div id="notices-box" style="margin-top:10px"></div>
+      </div>
+
+      <div class="grid cols-2">
+        <!-- 波及目录 -->
+        <div class="card">
+          <div class="card-title">波及目录 <span class="hint" id="dir-hint"></span></div>
+          <div id="dirs-box"></div>
+        </div>
+        <!-- 并行分支 -->
+        <div class="card">
+          <div class="card-title">并行分支动态 <span class="hint" id="par-hint"></span></div>
+          <div id="parallel-box"></div>
+        </div>
+      </div>
+
+      <!-- 文件影响清单 -->
+      <div class="card">
+        <div class="card-title">文件影响清单 <span class="hint" id="files-hint"></span>
+          <span class="spacer"></span>
+          <div class="filters" id="file-filters">
+            <span class="filter-btn active" data-f="all">全部</span>
+            <span class="filter-btn" data-f="risk">仅风险文件</span>
+            <span class="filter-btn" data-f="added">新增</span>
+            <span class="filter-btn" data-f="modified">修改</span>
+            <span class="filter-btn" data-f="deleted">删除</span>
+          </div>
+        </div>
+        <div id="files-box"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">说明</div>
+        <div class="small dim" style="line-height:1.9">
+          · <b>高风险</b>：diff3 干跑已确认会产生内容冲突、修改/删除冲突或二进制覆盖冲突，直接动手会失败或丢改动；<br>
+          · <b>需复核</b>：双侧改动虽不重叠、可自动合并，但同一文件正在被并行修改，建议尽早合并复核；<br>
+          · <b>知会</b>：对方改动与你的改动互不影响，合并时自动采纳；<br>
+          · 行号区间按变更后的文件行号给出（新增 <ins style="color:var(--ok)">+绿</ins> /
+          删除 <del style="color:var(--bad)">-红</del>），点击文件行可展开详情与冲突片段。
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+<div id="toasts"></div>
+<script src="js/app.js"></script>
+<script>
+"use strict";
+const { api, esc, fmtBytes, fmtTs, toast } = DFSVS;
+
+let mode = DFSVS.qs("mode") === "merge" ? "merge" : "commit";
+let data = null;
+let riskFilter = "all", fileFilter = "all";
+
+// ------------------------------------------------------------------ 工具
+const KIND_BADGE = {
+  added:    '<span class="badge ok plain">A</span>',
+  modified: '<span class="badge warn plain">M</span>',
+  deleted:  '<span class="badge bad plain">D</span>',
+  unchanged:'<span class="badge dim plain">=</span>',
+};
+const LEVEL_META = {
+  high: { ico: "⛔", cls: "high", name: "高风险" },
+  warn: { ico: "⚠",  cls: "warn", name: "需复核" },
+  info: { ico: "ℹ",  cls: "info", name: "知会" },
+  ok:   { ico: "✔",  cls: "ok",   name: "无风险" },
+};
+const CONFLICT_CN = {
+  "content": "内容冲突（diff3）", "add/add": "同路径新增冲突",
+  "modify/delete": "修改/删除冲突", "binary": "二进制双侧修改",
+  "ff-overwrite": "快进覆盖未提交改动", "parallel-clean": "并行修改（可自动合并）",
+  "parallel-one-side": "并行单侧变更",
+};
+
+function rng(r) {
+  if (!r) return "-";
+  return r[0] === r[1] ? `${r[0]}` : `${r[0]}–${r[1]}`;
+}
+
+// ------------------------------------------------------------------ 顶部
+async function loadSelectors() {
+  const d = await api("GET", "/api/version/branches");
+  const branches = d.branches;
+  const cm = document.getElementById("cm-branch");
+  cm.innerHTML = branches.map(b =>
+    `<option value="${esc(b.name)}" ${b.is_head ? "selected" : ""}>${esc(b.name)}</option>`).join("");
+  cm.onchange = loadAll;
+  const src = document.getElementById("mg-source");
+  const tgt = document.getElementById("mg-target");
+  const fill = (el, val) => el.innerHTML = branches.map(b =>
+    `<option value="${esc(b.name)}" ${b.name === val ? "selected" : ""}>${esc(b.name)}</option>`).join("");
+  fill(tgt, d.head_branch);
+  const other = branches.find(b => b.name !== d.head_branch);
+  fill(src, other ? other.name : d.head_branch);
+  src.onchange = loadAll;
+  tgt.onchange = () => { loadAll(); };
+  // 支持 query 预选
+  if (DFSVS.qs("source")) src.value = DFSVS.qs("source");
+  if (DFSVS.qs("target")) tgt.value = DFSVS.qs("target");
+}
+
+// ------------------------------------------------------------------ 数据
+async function fetchData() {
+  if (mode === "commit") {
+    const b = document.getElementById("cm-branch").value;
+    return api("GET", "/api/version/impact?branch=" + encodeURIComponent(b));
+  }
+  const s = document.getElementById("mg-source").value;
+  const t = document.getElementById("mg-target").value;
+  return api("GET", `/api/version/merge_preview?source=${encodeURIComponent(s)}&target=${encodeURIComponent(t)}`);
+}
+
+async function loadAll() {
+  const box = document.getElementById("verdict");
+  box.innerHTML = `<div class="small muted">分析中（读取三方内容、干跑 diff3）…</div>`;
+  try {
+    data = await fetchData();
+  } catch (e) {
+    box.innerHTML = `<div class="badge bad plain">分析失败：${esc(e.message)}</div>`;
+    return;
+  }
+  render();
+}
+
+// ------------------------------------------------------------------ 渲染
+function render() {
+  renderVerdict();
+  renderKpis();
+  renderRisks();
+  renderDirs();
+  renderParallel();
+  renderFiles();
+}
+
+function renderVerdict() {
+  const s = data.summary;
+  let ico, cls, title, sub;
+  if (mode === "commit") {
+    if (!s.dirty) { ico = "✅"; cls = "go"; title = "工作区干净，没有待提交改动";
+      sub = "当前没有需要预检的未提交修改。"; }
+    else if (s.high) { ico = "⛔"; cls = "stop";
+      title = `先别提交：${s.high} 个文件已确认会与并行分支冲突`;
+      sub = "提交后合并必然产生冲突标记或覆盖他人改动，请按下方理由先协调或先合并解决。"; }
+    else if (s.warn) { ico = "⚠"; cls = "hold";
+      title = `可以提交，但有 ${s.warn} 个文件正被并行分支同时修改`;
+      sub = "干跑显示双方改动不重叠、可自动合并；建议提交后尽快合并并复核。"; }
+    else { ico = "🟢"; cls = "go"; title = "可以安全提交";
+      sub = `${s.files} 个文件改动，与其它分支没有冲突风险。`; }
+  } else {
+    if (s.kind === "noop") { ico = "⏭"; cls = "go"; title = "无需合并";
+      sub = "源分支已被目标分支完全包含（noop）。"; }
+    else if (s.conflicts) { ico = "⛔"; cls = "stop";
+      title = `不要直接合并：干跑发现 ${s.conflicts} 个冲突文件`;
+      sub = `其中 ${s.content_conflicts} 个文本内容冲突；合并会写入 <<<<<<< 标记并产生待解决提交。请先在下方查看冲突位置。`; }
+    else if (s.high || s.warn) { ico = "⚠"; cls = "hold";
+      title = `合并可行，但有 ${s.high + s.warn} 个文件需要你确认`;
+      sub = "不会产生文本冲突标记，但存在覆盖/删除取舍，请逐条确认。"; }
+    else if (s.kind === "fast-forward") { ico = "⚡"; cls = "go";
+      title = "可以快进合并";
+      sub = `目标分支落后源分支 ${s.behind} 个提交，HEAD 将直接前移，无合并提交。`; }
+    else { ico = "🟢"; cls = "go"; title = "可以干净合并";
+      sub = "三方干跑无冲突，所有差异都能自动合并。"; }
+  }
+  document.getElementById("verdict").innerHTML = `
+    <div class="verdict ${cls}">
+      <div class="v-ico">${ico}</div>
+      <div style="flex:1">
+        <div class="v-title">${esc(title)}</div>
+        <div class="v-sub">${esc(sub)}</div>
+      </div>
+      ${verdictMeta()}
+    </div>`;
+}
+
+function verdictMeta() {
+  const s = data.summary;
+  if (mode === "commit") {
+    return `<div class="small dim mono" style="text-align:right">
+      分支 ${esc(s.branch)} @ ${esc(s.head_short)}<br>
+      分析时间 ${fmtTs(s.generated_at)}</div>`;
+  }
+  const kindCN = { noop: "无操作", "fast-forward": "快进", merge: "三方合并" }[s.kind];
+  return `<div class="small dim mono" style="text-align:right">
+    ${esc(s.source)} ${esc(s.source_head_short)} → ${esc(s.target)} ${esc(s.target_head_short)}<br>
+    ${kindCN} · base ${esc(s.base_short || "-")} · 领先 ${s.ahead} / 落后 ${s.behind}
+    ${s.auto_commit_files ? `<br><span style="color:var(--warn)">将先自动提交 ${s.auto_commit_files} 个未提交文件</span>` : ""}
+  </div>`;
+}
+
+function kpi(label, value, sub, cls = "") {
+  return `<div class="kpi ${cls}"><div class="k-label">${esc(label)}</div>
+    <div class="k-value">${value}</div><div class="k-sub">${esc(sub || "")}</div></div>`;
+}
+
+function renderKpis() {
+  const s = data.summary;
+  const box = document.getElementById("kpis");
+  if (mode === "commit") {
+    box.innerHTML =
+      kpi("波及文件", s.files, `+${s.added} ~${s.modified} -${s.deleted}`) +
+      kpi("波及目录", s.dirs, "顶层目录数") +
+      kpi("变更行", `+${s.adds} / -${s.dels}`, "行级增 / 删") +
+      kpi("高风险文件", s.high, "确认会冲突", s.high ? "bad" : "") +
+      kpi("需复核", s.warn, "并行修改中", s.warn ? "warn" : "");
+  } else {
+    box.innerHTML =
+      kpi("影响文件", s.files, `+${s.added} ~${s.modified} -${s.deleted}`) +
+      kpi("冲突文件", s.conflicts, `内容冲突 ${s.content_conflicts}`, s.conflicts ? "bad" : "ok") +
+      kpi("合并类型", { noop: "无操作", "fast-forward": "快进", merge: "三方" }[s.kind],
+          `领先 ${s.ahead} · 落后 ${s.behind}`) +
+      kpi("高风险", s.high, "覆盖/冲突", s.high ? "bad" : "") +
+      kpi("需确认", s.warn, "删除/取舍", s.warn ? "warn" : "");
+  }
+}
+
+// ------------------------------------------------------------------ 风险
+function riskPath(r) {
+  const m = LEVEL_META[r.level] || LEVEL_META.info;
+  const tags = [
+    r.kind ? `<span class="tag ${r.level === "high" ? "high" : r.level}">${esc(CONFLICT_CN[r.kind] || r.kind)}</span>` : "",
+    r.branch ? `<span class="tag branch">⑂ ${esc(r.branch)}</span>` : "",
+  ].join("");
+  return `<div class="risk-item ${m.cls}">
+    <div class="risk-ico">${m.ico}</div>
+    <div class="risk-body">
+      <div class="risk-path">${esc(r.path)}</div>
+      <div class="risk-reason">${esc(r.reason)}</div>
+      ${r.suggestion ? `<div class="risk-sug">${esc(r.suggestion)}</div>` : ""}
+      <div class="risk-tags">${tags}</div>
+      ${(r.snippets || []).map(snippetHtml).join("")}
+    </div>
+  </div>`;
+}
+
+function snippetHtml(sn) {
+  const side = (cls, label, obj) => obj ? `
+    <div class="cf-side ${cls}">
+      <div class="cf-label">${esc(label)}（base 行 ${rng(sn.base_range)}）</div>
+      <div class="cf-lines">${esc((obj.lines || []).join("\n")) || '<span class="dim">（空）</span>'}</div>
+      ${obj.truncated ? `<div class="cf-more">… 共 ${obj.total_lines} 行，仅预览前几行</div>` : ""}
+    </div>` : "";
+  return `<div class="cf-block">
+    ${side("base", "共同祖先 base", sn.base)}
+    ${side("ours", "我方版本", sn.ours)}
+    ${side("", "对方版本", sn.theirs)}
+  </div>`;
+}
+
+function renderRisks() {
+  const risks = data.risks || [];
+  const box = document.getElementById("risks-box");
+  const shown = risks.filter(r => riskFilter === "all" || r.level === riskFilter);
+  document.getElementById("risk-hint").textContent =
+    `${risks.length} 条（高 ${data.summary.high} · 复核 ${data.summary.warn} · 知会 ${data.summary.info}）`;
+  box.innerHTML = shown.length
+    ? shown.map(riskPath).join("")
+    : `<div class="empty small">${risks.length ? "当前筛选下没有风险条目" : "没有发现冲突风险 ✔"}</div>`;
+
+  const notices = data.notices || [];
+  document.getElementById("notices-box").innerHTML = notices.map(n => {
+    const m = LEVEL_META[n.level] || LEVEL_META.info;
+    return `<div class="risk-item ${m.cls}" style="margin-bottom:6px">
+      <div class="risk-ico">${m.ico}</div>
+      <div class="risk-body"><div class="risk-reason" style="color:var(--text)">${esc(n.message)}</div></div>
+    </div>`;
+  }).join("");
+}
+
+// ------------------------------------------------------------------ 目录
+function renderDirs() {
+  const dirs = data.dirs || [];
+  document.getElementById("dir-hint").textContent = `${dirs.length} 个顶层目录`;
+  document.getElementById("dirs-box").innerHTML = dirs.length
+    ? dirs.map(d => `<div class="dir-chip" style="margin-bottom:6px">
+        <span class="mono">${esc(d.dir)}</span>
+        <span class="badge acc plain">${d.files} 文件</span></div>`).join("")
+    : `<div class="empty small">本次改动不波及任何目录</div>`;
+}
+
+// ------------------------------------------------------------------ 并行分支
+function renderParallel() {
+  const box = document.getElementById("parallel-box");
+  if (mode === "merge") {
+    box.innerHTML = `<div class="small dim">合并预检直接显示完整干跑结果，无需单独查看并行分支。</div>`;
+    document.getElementById("par-hint").textContent = "";
+    return;
+  }
+  const ps = data.parallel || [];
+  const riskPaths = new Set((data.risks || []).map(r => `${r.branch} ${r.path}`));
+  document.getElementById("par-hint").textContent = `${ps.length} 个分支有未合并提交`;
+  box.innerHTML = ps.length ? ps.map(p => `
+    <div class="branch-card">
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="bn">⑂ ${esc(p.branch)}</span>
+        <span class="tag">${esc(p.head_short)}</span>
+        <span class="spacer" style="flex:1"></span>
+        <span class="small muted mono">领先 ${p.ahead} 提交</span>
+      </div>
+      <div class="small dim" style="margin-top:5px">
+        已改 <b>${p.touched_files}</b> 个文件
+        <span style="color:var(--ok)">+${p.added}</span> /
+        <span style="color:var(--text-dim)">~${p.modified}</span> /
+        <span style="color:var(--bad)">-${p.deleted}</span>
+      </div>
+    </div>`).join("")
+    : `<div class="empty small">没有领先于当前分支的其它分支，不存在并行修改来源。</div>`;
+}
+
+// ------------------------------------------------------------------ 文件清单
+function fileRow(f) {
+  const risks = f.risks || [];
+  const hi = risks.some(r => r.level === "high");
+  const wn = risks.some(r => r.level === "warn");
+  const dot = hi ? '<span title="高风险">🔴</span>'
+             : wn ? '<span title="需复核">🟡</span>' : "";
+  const lineStat = (f.adds === null || f.adds === undefined)
+    ? "" : `<span><span style="color:var(--ok)">+${f.adds ?? 0}</span>
+            <span style="color:var(--bad)">-${f.dels ?? 0}</span></span>`;
+  const resTag = f.resolution_cn
+    ? `<span class="tag ${f.conflict_kind ? "high" : ""}">${esc(f.resolution_cn)}</span>` : "";
+  const cfTag = f.conflict_kind
+    ? `<span class="tag high">${esc(CONFLICT_CN[f.conflict_kind] || f.conflict_kind)}</span>` : "";
+  const acTag = f.auto_commit ? `<span class="tag warn">合并前自动提交</span>` : "";
+  const parTags = (f.parallel_branches || []).map(b => {
+    const mark = { added: "+", deleted: "-", modified: "~" }[b.kind] || "";
+    const who = (b.authors || []).join(",");
+    return `<span class="tag branch">⑂ ${esc(b.branch)} ${mark}${who ? " · " + esc(who) : ""}</span>`;
+  }).join("");
+  const hunkChips = (f.hunks || []).slice(0, 12).map(h => {
+    if (h.kind === "insert")
+      return `<span class="hunk-chip">行 <ins>+${rng(h.new_range)}</ins></span>`;
+    if (h.kind === "delete")
+      return `<span class="hunk-chip">行 <del>-${rng(h.old_range)}</del></span>`;
+    return `<span class="hunk-chip"><del>-${rng(h.old_range)}</del> →
+      <ins>+${rng(h.new_range)}</ins></span>`;
+  }).join("");
+  const diffHref = mode === "commit"
+    ? `diff.html?a=HEAD&b=WORKING&path=${encodeURIComponent(f.path)}`
+    : `diff.html?a=${encodeURIComponent(data.summary.target)}&b=${encodeURIComponent(data.summary.source)}&path=${encodeURIComponent(f.path)}`;
+  return `<div class="file-row" data-kind="${f.kind}" data-risk="${hi ? "high" : wn ? "warn" : "none"}">
+    <div class="file-head">
+      <span class="file-caret">▶</span>
+      <span class="file-kind">${KIND_BADGE[f.kind] || ""}</span>
+      <span>${dot}</span>
+      <span class="file-path">${esc(f.path)}</span>
+      <span class="file-meta">
+        ${resTag}${cfTag}${acTag}
+        ${lineStat}
+        <span title="大小">${fmtBytes(f.new_size || f.old_size)}</span>
+      </span>
+    </div>
+    <div class="file-body">
+      <div class="small dim" style="margin-bottom:4px">
+        目录 <span class="mono">${esc(f.dir)}</span> ·
+        MIME ${esc(f.mime || "-")} ·
+        内容哈希 ${esc(f.old_hash || "∅")} → ${esc(f.new_hash || "∅（删除）")}
+      </div>
+      ${parTags ? `<div class="risk-tags">${parTags}</div>` : ""}
+      ${hunkChips ? `<div class="small muted" style="margin:6px 0 2px">受影响行：</div><div class="hunk-chips">${hunkChips}</div>` : ""}
+      ${(f.hunks || []).length > 12 ? `<div class="small dim">另有 ${f.hunks.length - 12} 个变更区间未列出</div>` : ""}
+      ${risks.map(riskPath).join("")}
+      <div style="margin-top:6px">
+        <a class="btn xs ghost" href="${diffHref}">查看行级差异 →</a>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderFiles() {
+  const rows = mode === "commit" ? (data.changes || []) : (data.rows || []);
+  const box = document.getElementById("files-box");
+  document.getElementById("files-hint").textContent =
+    `${rows.filter(r => r.kind !== "unchanged").length} 个受影响文件` +
+    (mode === "merge" ? `（清单含 ${rows.length} 个参与三方判定的文件）` : "");
+  const keep = rows.filter(f => {
+    if (fileFilter === "all") return f.kind !== "unchanged" || (f.risks || []).length;
+    if (fileFilter === "risk") return (f.risks || []).length || f.conflict_kind;
+    return f.kind === fileFilter;
+  });
+  box.innerHTML = keep.length
+    ? keep.map(fileRow).join("")
+    : `<div class="empty small">没有匹配的文件</div>`;
+  box.querySelectorAll(".file-head").forEach(h => h.onclick = () =>
+    h.closest(".file-row").classList.toggle("open"));
+  // 默认展开高风险文件
+  box.querySelectorAll('.file-row[data-risk="high"]').forEach(r => r.classList.add("open"));
+}
+
+// ------------------------------------------------------------------ 交互
+document.querySelectorAll(".mode-tab").forEach(t => t.onclick = () => {
+  document.querySelectorAll(".mode-tab").forEach(x => x.classList.remove("active"));
+  t.classList.add("active");
+  mode = t.dataset.mode;
+  document.getElementById("bar-commit").classList.toggle("hidden", mode !== "commit");
+  document.getElementById("bar-merge").classList.toggle("hidden", mode !== "merge");
+  loadAll();
+});
+document.getElementById("btn-refresh").onclick = loadAll;
+document.querySelectorAll("#risk-filters .filter-btn").forEach(b => b.onclick = () => {
+  document.querySelectorAll("#risk-filters .filter-btn").forEach(x => x.classList.remove("active"));
+  b.classList.add("active"); riskFilter = b.dataset.f; renderRisks();
+});
+document.querySelectorAll("#file-filters .filter-btn").forEach(b => b.onclick = () => {
+  document.querySelectorAll("#file-filters .filter-btn").forEach(x => x.classList.remove("active"));
+  b.classList.add("active"); fileFilter = b.dataset.f; renderFiles();
+});
+
+initPage("impact.html", "提交 / 合并预检").then(async () => {
+  await loadSelectors();
+  if (mode === "merge") {
+    document.querySelectorAll(".mode-tab").forEach(x =>
+      x.classList.toggle("active", x.dataset.mode === "merge"));
+    document.getElementById("bar-commit").classList.add("hidden");
+    document.getElementById("bar-merge").classList.remove("hidden");
+  }
+  loadAll().catch(e => toast(e.message, "bad"));
+  DFSVS.poll(loadAll, 15000);
+});
+</script>
+</body>
+</html>

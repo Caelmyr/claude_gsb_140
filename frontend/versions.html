@@ -39,8 +39,10 @@
           <span class="hint" id="dirty-hint"></span>
           <span class="spacer"></span>
           <button class="btn sm primary" id="btn-commit">✔ 提交工作区</button>
+          <button class="btn sm" id="btn-impact" title="提交前查看影响清单与并行冲突风险">🛡 提交预检</button>
           <button class="btn sm" id="btn-branch">⑂ 新建分支</button>
           <button class="btn sm" id="btn-merge">⇄ 合并…</button>
+          <button class="btn sm" id="btn-merge-check" title="不合并不落盘，先看冲突风险">🔍 合并预检</button>
           <button class="btn sm" id="btn-checkout" title="把选中分支物化到文件系统">⎇ 检出</button>
         </div>
         <div class="branch-bar" id="branch-bar"></div>
@@ -224,6 +226,12 @@ function bindChangeClicks(container, a, b) {
 
 document.getElementById("btn-more").onclick = () => { shownCommits += 30; loadTimeline(); };
 
+// ------------------------------------------------------------------ 预检入口
+document.getElementById("btn-impact").onclick = () =>
+  location.href = "impact.html?mode=commit";
+document.getElementById("btn-merge-check").onclick = () =>
+  location.href = "impact.html?mode=merge&target=" + encodeURIComponent(headBranch);
+
 // ------------------------------------------------------------------ 提交
 document.getElementById("btn-commit").onclick = async () => {
   let wd;
@@ -286,7 +294,8 @@ document.getElementById("btn-merge").onclick = async () => {
         <input type="text" id="mg-dst" value="${esc(brs.head_branch)}" readonly></label>
     </div>
     <div class="small muted">合并采用三方算法：base = 两分支的最近公共祖先（LCA）。
-      文本冲突将写入 <span class="mono">&lt;&lt;&lt;&lt;&lt;&lt;&lt;</span> 标记并提交为冲突待解决状态。</div>
+      文本冲突将写入 <span class="mono">&lt;&lt;&lt;&lt;&lt;&lt;&lt;</span> 标记并提交为冲突待解决状态。
+      拿不准时先 <a id="mg-precheck-link" href="#">🔍 合并预检（干跑，不落盘）</a>。</div>
     <div id="mg-result" style="margin-top:12px"></div>`;
   const m = modal({
     title: "合并分支", body, wide: true, okText: "执行合并",
@@ -326,6 +335,15 @@ document.getElementById("btn-merge").onclick = async () => {
       }
     }
   });
+  // 合并预检链接：带上当前选择的源/目标分支，跳到预检页做只读干跑
+  const syncPreLink = () => {
+    const src = body.querySelector("#mg-src").value;
+    const dst = body.querySelector("#mg-dst").value;
+    body.querySelector("#mg-precheck-link").href =
+      `impact.html?mode=merge&source=${encodeURIComponent(src)}&target=${encodeURIComponent(dst)}`;
+  };
+  body.querySelector("#mg-src").onchange = syncPreLink;
+  syncPreLink();
 };
 
 // ------------------------------------------------------------------ 检出
